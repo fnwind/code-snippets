@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>分片上传测试</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            border: 1px solid #ccc;
+            padding: 20px;
+            border-radius: 5px;
+        }
+        .progress {
+            width: 100%;
+            height: 20px;
+            background-color: #f0f0f0;
+            border-radius: 10px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.3s;
+            text-align: center;
+            line-height: 20px;
+            color: white;
+            font-size: 12px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #log {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 5px;
+            height: 150px;
+            overflow-y: scroll;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>分片上传测试</h1>
+        <input type="file" id="fileInput" /><br>
+        <button id="uploadBtn" onclick="uploadFile()">上传</button>
+        <button id="pauseBtn" onclick="pauseUpload()" disabled>暂停</button>
+        <button id="resumeBtn" onclick="resumeUpload()" disabled>继续</button>
+        <div class="progress">
+            <div class="progress-bar" id="progressBar">0%</div>
+        </div>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        const chunkSize = 1024 * 1024; // 1MB per chunk
+        let file = null;
+        let fileHash = null;
+        let uploadedChunks = [];
+        let currentChunkIndex = 0;
+        let isPaused = false;
+        let isUploading = false;
+
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            file = e.target.files[0];
+            if (file) {
+                log(`选中文件: ${file.name}, 大小: ${formatFileSize(file.size)}`);
+                document.getElementById('uploadBtn').disabled = false;
+            }
+        });
+
+        async function uploadFile() {
+            if (!file) {
+                log('请先选择文件');
+                return;
+            }
+
+            isUploading = true;
+            document.getElementById('uploadBtn').disabled = true;
+            document.getElementById('pauseBtn').disabled = false;
+            document.getElementById('resumeBtn').disabled = true;
+            isPaused = false;
+            currentChunkIndex = 0;
+            uploadedChunks = [];
+            
+            log('开始上传...');
+            
+            // 计算文件哈希（简单实现）
+            fileHash = await calculateFileHash(file);
+            log(`文件哈希: ${fileHash}`);
+            
+            // 准备上传
+            await prepareUpload();
+            
+            // 开始分片上传
+            uploadNextChunk();
+        }
+
+        function pauseUpload() {
+            isPaused = true;
+            document.getElementById('pauseBtn').disabled = true;
+            document.getElementById('resumeBtn').disabled = false;
+            log('上传已暂停');
+        }
+
+        function resumeUpload() {
+            isPaused = false;
+            document.getElementById('pauseBtn').disabled = false;
+            document.getElementById('resumeBtn').disabled = true;
+            log('继续上传');
+            uploadNextChunk();
+        }
+
+        async function prepareUpload() {
+            const totalChunks = Math.ceil(file.size / chunkSize);
+            log(`文件将分为 ${totalChunks} 个分片上传`);
+            
+            const formData = new FormData();
+            formData.append('fileSize', file.size);
+            formData.append('contentHash', fileHash);
+            formData.append('fileName', file.name);
+            formData.append('totalChunks', totalChunks);
+            
+            const response = await fetch('/file/prepare', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            log('准备上传结果:', result);
+            
+            if (result.uploaded) {
+                log('文件已存在，秒传成功');
+                updateProgress(100);
+                isUploading = false;
+                return;
+            }
+            
+            uploadedChunks = result.uploadedChunks || [];
+            currentChunkIndex = uploadedChunks.length;
+            log(`已上传 ${uploadedChunks.length} 个分片`);
+            updateProgress((uploadedChunks.length / Math.ceil(file.size / chunkSize)) * 100);
+        }
+
+        function uploadNextChunk() {
+            if (isPaused || !isUploading) {
+                return;
+            }
+            
+            const totalChunks = Math.ceil(file.size / chunkSize);
+            
+            if (currentChunkIndex >= totalChunks) {
+                log('上传完成！');
+                isUploading = false;
+                document.getElementById('pauseBtn').disabled = true;
+                document.getElementById('resumeBtn').disabled = true;
+                updateProgress(100);
+                return;
+            }
+            
+            // 检查当前分片是否已上传
+            if (uploadedChunks.includes(currentChunkIndex)) {
+                log(`分片 ${currentChunkIndex} 已上传，跳过`);
+                currentChunkIndex++;
+                uploadNextChunk();
+                return;
+            }
+            
+            const start = currentChunkIndex * chunkSize;
+            const end = Math.min(start + chunkSize, file.size);
+            const chunk = file.slice(start, end);
+            
+            log(`上传分片 ${currentChunkIndex} (${start}-${end})`);
+            
+            const formData = new FormData();
+            formData.append('chunk', chunk);
+            formData.append('fileHash', fileHash);
+            formData.append('chunkIndex', currentChunkIndex);
+            formData.append('start', start);
+            
+            fetch('/file/uploadChunk', {
+                method: 'POST',
+                body: formData
+            }).then(response => response.json())
+              .then(success => {
+                  if (success) {
+                      log(`分片 ${currentChunkIndex} 上传成功`);
+                      uploadedChunks.push(currentChunkIndex);
+                      currentChunkIndex++;
+                      updateProgress((uploadedChunks.length / totalChunks) * 100);
+                      uploadNextChunk();
+                  } else {
+                      log(`分片 ${currentChunkIndex} 上传失败，重试...`);
+                      setTimeout(uploadNextChunk, 1000);
+                  }
+              })
+              .catch(error => {
+                  log(`分片 ${currentChunkIndex} 上传出错: ${error.message}`);
+                  setTimeout(uploadNextChunk, 1000);
+              });
+        }
+
+        // 简单的文件哈希计算（实际项目中应该使用更安全的哈希算法）
+        function calculateFileHash(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const buffer = e.target.result;
+                    let hash = 0;
+                    for (let i = 0; i < buffer.byteLength; i++) {
+                        hash = ((hash << 5) - hash) + buffer[i];
+                        hash = hash & hash;
+                    }
+                    resolve(Math.abs(hash).toString(16));
+                };
+                reader.readAsArrayBuffer(file.slice(0, 1024 * 1024)); // 只读取前1MB计算哈希
+            });
+        }
+
+        function updateProgress(percent) {
+            const progressBar = document.getElementById('progressBar');
+            progressBar.style.width = percent + '%';
+            progressBar.textContent = percent.toFixed(1) + '%';
+        }
+
+        function log(message, data) {
+            const logDiv = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            let logMessage = `[${time}] ${message}`;
+            if (data) {
+                logMessage += ' ' + JSON.stringify(data);
+            }
+            const p = document.createElement('p');
+            p.textContent = logMessage;
+            logDiv.appendChild(p);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+    </script>
+</body>
+</html>
